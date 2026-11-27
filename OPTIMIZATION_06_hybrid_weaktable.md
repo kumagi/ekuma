@@ -91,8 +91,10 @@ Design `weakEntries` (32 bytes: `firstTable weak.Pointer[WeakTable]`, `first Val
      - Lock `ex.mu`, delete any stale primitive entry in `t.prims`, store `ex.rest[table] = weakVal{val: v, tracked: true}`, and periodically sweep dead tables from `ex.rest` (`e.table.Value() == nil`) using an adaptive `ex.sweepAt` threshold (`max(minWeakSweep, 2*len(ex.rest))`).
    - Also keep `runtime.KeepAlive(t)` after reading `t.self` (and `runtime.KeepAlive(w)` in `weakTableKeys.clear`) so the GC cannot prematurely collect `t` while its weak pointer is being compared!
 
-5. **Dead-slot reuse on `w.firstTable`**:
-   - When `t.Set(k, v)` sees `w.firstTable` is non-zero but `w.firstTable.Value() == nil` (the previous owner `WeakTable` was already collected), reclaim `w.firstTable` directly for `t` (clearing `ex.firstTracked` if needed).
+5. **Dead-slot reuse on `w.firstTable` and Phase 2 24-Byte Single-Pointer `weakPrimEntry` Refinement**:
+   - When `t.Set(k, v)` sees `w.firstTable` is non-zero but `w.firstTable.Value() == nil` (the previous owner `WeakTable` was already collected), reclaim `w.firstTable` directly for `t` (clearing `ex.firstTracked` if needed). Even when `ex != nil && !ex.shared`, if `len(t.prims) == 0 && ex.rest == nil && (w.firstTable == zero || w.firstTable.Value() == nil)`, reuse `w.firstTable = table; w.first = v` instead of spilling into `t.prims`!
+   - **Compact 24-byte 1-pointer `weakPrimEntry`**: Because every value stored in `t.prims` satisfies `isWeakPrimitive(v)` (only 6 possible singleton tags: `Undefined`, `Null`, `False`, `True`, `Number`, `BigInt64`), store `val float64` + `kind uint8` instead of a 16-byte `Value{O *Object, N float64}`! This shrinks `weakPrimEntry` from **32 bytes (2 GC pointers)** to **24 bytes (1 GC pointer: `key` only)** — cutting GC pointer scanning of `t.prims` in half, eliminating write barriers on `e.val` updates, and improving `weak_map_set` further to **112.9 µs (2.87x vs baseline)** and `weak_map_delete` to **236.7 µs (3.94x vs baseline)**.
+   - In `WeakTable.Delete`, check `w.firstTable == table` *before* probing `t.prims` whenever `ex == nil || !ex.shared`.
 
 ### 5.3 WeakMap & WeakSet Quiet Kernels (`internal/quiet/collectionkernels.go`, `internal/builtin/weak.go`)
 
